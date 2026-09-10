@@ -142,13 +142,13 @@ def mix_chapter(text_file, gender, output_filename):
             parsed_lines.append((current_bgm, current_sfx, clean_text))
 
     combined_voice = AudioSegment.silent(duration=0)
-    combined_sfx = AudioSegment.silent(duration=0)
     
-    # 用嚟精準記錄「哪一段時間需要哪一種 BGM」
+    # 用嚟精準記錄「哪一段時間需要哪一種 BGM / SFX」
     bgm_timeline = [] # (dur_ms, bgm_type)
+    sfx_timeline = [] # (dur_ms, sfx_tag) 新增呢行記錄音效
     created_temp_files = []
 
-    print(f"🔊 正在進行連貫式 BGM 時間軸合成 (共 {len(parsed_lines)} 行)...")
+    print(f"🔊 正在進行連貫式 BGM 及 SFX 時間軸合成 (共 {len(parsed_lines)} 行)...")
 
     for idx, (bgm_type, sfx_tag, text) in enumerate(parsed_lines):
         temp_file = f"temp_{gender}_{idx}.mp3"
@@ -164,17 +164,8 @@ def mix_chapter(text_file, gender, output_filename):
         # 1. 疊加語音
         combined_voice += raw_voice + AudioSegment.silent(duration=1500)
 
-        # 2. 獨立疊加當前音效
-        seg_sfx = AudioSegment.silent(duration=seg_dur)
-        if sfx_tag and sfx_tag in TAG_AUDIO_MAP:
-            sfx_file = TAG_AUDIO_MAP[sfx_tag]
-            if os.path.exists(sfx_file):
-                snd = AudioSegment.from_file(sfx_file)
-                snd_looped = (snd * (int(seg_dur / len(snd)) + 1))[:seg_dur] - 22
-                seg_sfx = snd_looped.fade_in(300).fade_out(800)
-        combined_sfx += seg_sfx
-
-        # 3. 記錄 BGM 時間長度（唔好喺呢度剪斷 BGM！）
+        # 2. 記錄 SFX 同 BGM 時間長度（唔好喺呢度剪斷！）
+        sfx_timeline.append((seg_dur, sfx_tag))
         bgm_timeline.append((seg_dur, bgm_type))
 
     for t_file in created_temp_files:
@@ -185,7 +176,34 @@ def mix_chapter(text_file, gender, output_filename):
         print(f"❌ {gender} 語音合成失敗。")
         return
 
-    # 4. 【核心突破】：將連續相同 BGM 類型嘅時間「合併成大區塊」，順暢播放不重頭！
+    # 3. 【核心突破 1】：處理 SFX 連續區塊，順暢播放不中斷！
+    sfx_blocks = []
+    if sfx_timeline:
+        curr_dur, curr_tag = sfx_timeline[0]
+        for dur, s_tag in sfx_timeline[1:]:
+            if s_tag == curr_tag:
+                curr_dur += dur
+            else:
+                sfx_blocks.append((curr_dur, curr_tag))
+                curr_dur = dur
+                curr_tag = s_tag
+        sfx_blocks.append((curr_dur, curr_tag))
+
+    combined_sfx = AudioSegment.silent(duration=0)
+    for block_dur, s_tag in sfx_blocks:
+        if s_tag and s_tag in TAG_AUDIO_MAP:
+            sfx_file = TAG_AUDIO_MAP[s_tag]
+            if os.path.exists(sfx_file):
+                snd = AudioSegment.from_file(sfx_file)
+                snd_looped = (snd * (int(block_dur / len(snd)) + 1))[:block_dur] - 22
+                block_sfx = snd_looped.fade_in(800).fade_out(800)
+                combined_sfx += block_sfx
+            else:
+                combined_sfx += AudioSegment.silent(duration=block_dur)
+        else:
+            combined_sfx += AudioSegment.silent(duration=block_dur)
+
+    # 4. 【核心突破 2】：將連續相同 BGM 類型嘅時間「合併成大區塊」
     bgm_blocks = [] # (total_dur, bgm_type)
     if bgm_timeline:
         curr_dur, curr_type = bgm_timeline[0]
@@ -216,7 +234,7 @@ def mix_chapter(text_file, gender, output_filename):
     total_dur = len(combined_voice) + 2000
     final_mix = combined_bgm[:total_dur].overlay(combined_sfx[:total_dur]).overlay(combined_voice, position=1000)
     final_mix.export(output_filename, format="mp3")
-    print(f"🎉 成功完成【BGM 獨立長播、音效不卡頓】終極混音檔: {output_filename}")
+    print(f"🎉 成功完成【BGM 及 SFX 獨立長播、音效不卡頓】終極混音檔: {output_filename}")
 
 def generate_mp4(audio_file, video_output, text_file="input.txt"):
     try:
