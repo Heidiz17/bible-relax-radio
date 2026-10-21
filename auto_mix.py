@@ -58,10 +58,15 @@ def download_chinese_font():
 def create_title_cover(base_image_path, title_text, output_image_path):
     try:
         font_file = download_chinese_font()
-        img = Image.open(base_image_path).convert("RGBA")
-        width, height = img.size
         
-        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        # 1. 自動支援 JPG / PNG，防止 CMYK 報錯並縮放至 1080p
+        with Image.open(base_image_path) as raw_img:
+            img = raw_img.convert("RGBA")
+            img.thumbnail((1920, 1080), Image.Resampling.LANCZOS)
+            width, height = img.size
+        
+        # 2. 製作半透明文字遮罩
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
         
         rect_top = int(height * 0.32)
@@ -85,9 +90,12 @@ def create_title_cover(base_image_path, title_text, output_image_path):
         draw.text((width / 2, height * 0.42), brand_text, font=brand_font, fill=(255, 215, 0), anchor="mm")
         draw.text((width / 2, height * 0.58), title_text, font=title_font, fill=(255, 255, 255), anchor="mm")
         
-        img.save(output_image_path)
+        # 3. 統一以 PNG 格式最佳化存檔，供 MoviePy 順暢讀取
+        img.save(output_image_path, format="PNG", optimize=True)
+        print(f"🖼️ 封面底圖已安全優化並生成: {output_image_path}")
         return True
     except Exception as e:
+        print(f"⚠️ 封面生成錯誤: {e}")
         return False
 
 async def generate_tts(text, voice, output_mp3):
@@ -142,10 +150,8 @@ def mix_chapter(text_file, gender, output_filename):
             parsed_lines.append((current_bgm, current_sfx, clean_text))
 
     combined_voice = AudioSegment.silent(duration=0)
-    
-    # 用嚟精準記錄「哪一段時間需要哪一種 BGM / SFX」
-    bgm_timeline = [] # (dur_ms, bgm_type)
-    sfx_timeline = [] # (dur_ms, sfx_tag) 新增呢行記錄音效
+    bgm_timeline = []
+    sfx_timeline = []
     created_temp_files = []
 
     print(f"🔊 正在進行連貫式 BGM 及 SFX 時間軸合成 (共 {len(parsed_lines)} 行)...")
@@ -161,10 +167,7 @@ def mix_chapter(text_file, gender, output_filename):
         raw_voice = AudioSegment.from_file(temp_file)
         seg_dur = len(raw_voice) + 1500
         
-        # 1. 疊加語音
         combined_voice += raw_voice + AudioSegment.silent(duration=1500)
-
-        # 2. 記錄 SFX 同 BGM 時間長度（唔好喺呢度剪斷！）
         sfx_timeline.append((seg_dur, sfx_tag))
         bgm_timeline.append((seg_dur, bgm_type))
 
@@ -176,7 +179,7 @@ def mix_chapter(text_file, gender, output_filename):
         print(f"❌ {gender} 語音合成失敗。")
         return
 
-    # 3. 【核心突破 1】：處理 SFX 連續區塊，順暢播放不中斷！
+    # 處理 SFX 連續區塊
     sfx_blocks = []
     if sfx_timeline:
         curr_dur, curr_tag = sfx_timeline[0]
@@ -203,8 +206,8 @@ def mix_chapter(text_file, gender, output_filename):
         else:
             combined_sfx += AudioSegment.silent(duration=block_dur)
 
-    # 4. 【核心突破 2】：將連續相同 BGM 類型嘅時間「合併成大區塊」
-    bgm_blocks = [] # (total_dur, bgm_type)
+    # 處理 BGM 連續區塊
+    bgm_blocks = []
     if bgm_timeline:
         curr_dur, curr_type = bgm_timeline[0]
         for dur, b_type in bgm_timeline[1:]:
@@ -223,8 +226,6 @@ def mix_chapter(text_file, gender, output_filename):
             bg_music = AudioSegment.from_file(bgm_file)
             target_loudness = -22.0
             bg_music = bg_music.apply_gain(target_loudness - bg_music.dBFS)
-            
-            # 長播 Seamless Loop，中間音效完全唔會切斷佢！
             music_looped = (bg_music * (int(block_dur / len(bg_music)) + 1))[:block_dur]
             block_bgm = music_looped.fade_in(800).fade_out(800)
             combined_bgm += block_bgm
@@ -234,17 +235,33 @@ def mix_chapter(text_file, gender, output_filename):
     total_dur = len(combined_voice) + 2000
     final_mix = combined_bgm[:total_dur].overlay(combined_sfx[:total_dur]).overlay(combined_voice, position=1000)
     final_mix.export(output_filename, format="mp3")
-    print(f"🎉 成功完成【BGM 及 SFX 獨立長播、音效不卡頓】終極混音檔: {output_filename}")
+    print(f"🎉 成功完成終極混音檔: {output_filename}")
+
+def find_cover_image():
+    """自動尋找封面圖：優先支援 PNG 及各類 JPG/JPEG"""
+    candidates = ['cover.png', 'cover.jpg', 'cover.jpeg', 'default_cover.png', 'default_cover.jpg']
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+            
+    # 如果上面都冇，自動搵目錄下第一張 png 或 jpg
+    for file in os.listdir('.'):
+        if file.lower().endswith(('.png', '.jpg', '.jpeg')) and not file.startswith('final_cover'):
+            return file
+    return None
 
 def generate_mp4(audio_file, video_output, text_file="input.txt"):
     try:
         from moviepy import AudioFileClip, ImageClip
         
-        base_image = 'cover.png' if os.path.exists('cover.png') else 'default_cover.png'
-        if not os.path.exists(base_image):
+        base_image = find_cover_image()
+        if not base_image:
+            print("⚠️ 找不到任何封面圖片 (PNG/JPG)，跳過 MP4 生成。")
             return
 
-        title_text = "創世記 第六章"
+        print(f"🖼️ 正在使用封面圖來源: {base_image}")
+
+        title_text = "創世記 第四十一章"
         if os.path.exists(text_file):
             with open(text_file, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -274,7 +291,7 @@ def generate_mp4(audio_file, video_output, text_file="input.txt"):
 if __name__ == "__main__":
     if os.path.exists("input.txt"):
         mix_chapter("input.txt", 'boy', "temp_Pboy.mp3")
-        generate_mp4("temp_Pboy.mp3", "genesis_ch6_Pboy.mp4", "input.txt")
+        generate_mp4("temp_Pboy.mp3", "genesis_output_Pboy.mp4", "input.txt")
 
         mix_chapter("input.txt", 'girl', "temp_Pgirl.mp3")
-        generate_mp4("temp_Pgirl.mp3", "genesis_ch6_Pgirl.mp4", "input.txt")
+        generate_mp4("temp_Pgirl.mp3", "genesis_output_Pgirl.mp4", "input.txt")
